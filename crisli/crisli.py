@@ -4,28 +4,38 @@ This is a tool for a creating gRNA libraries. First I will focus on crispr inhib
 then later we I may extend it if needed and any generalities I discover will be dealt with then, not now.
 That means I wont even consider the other potential future uses right now.
 
-This is going to be a command line tool using standard python command line tool library (argparse?)
+This is going to be a command line tool using standard python command line tool library (argparse)
 
 As input it will need (for inhibition library)
 external inputs:
-1) A DNA sequence
-2) A set of TSS with coordinates+strand for the DNA sequence
-	The crisli tss format is a tab separated file with:
-	1 tss per line
-	id<tab>contig name<tab>strand<tab>position
-3) gRNA per TSS
-internal inputs: (input that may become options)
-4) rules about where to look for targets (e.g. +/- 50 bp from TSS, both strands/only 1
-5) Filters: GC (20-80%), no duplicates
+1) A sequence file (fasta)
+2) A list of regions in which to find gRNAs
+	The crisli region file format is a tab separated file with 1 region per line (I suppose this could have been a standard annotation format...)
+	id<tab>contig name<tab>strand<tab>start position<tab>end position
+	The strand indicates where to look for gRNA
+	1 = search on forward strand
+	0 = search both strands
+	-1 = search reverse strand
+3) gRNAs to find per region
 
-maybe it will also run crispy++ scoring and pick best, if so
-6) strategy to pick best
+internal inputs: (input that maybe should be external options)
+1) Filters: GC (20-80%), selection strategy
+
+
+# search strategy (this is based on the regions being Transcription Units (TU) and greatest effect is seen early in the region
+# and we dont care much that a grna targets sequence outside of the defined regions
+	find all grnas in regions and associate grnas with their region (a grna may reside in overlapping regions)
+	remove identical/similar ones (same sequence but different position) so only unique ones are left (grna may still be identical to sequence outside the regions)
+	score remaining with crispy++
+	pick X best grnas per region based on position+score or if less than X available, pick all
 
 so, there we are, a somewhat defined idea
 """
 
 import argparse
 import sqlite3
+from subprocess import run
+from shlex import split as shsplit
 from Bio import SeqIO
 
 
@@ -41,101 +51,143 @@ def findall(sub, string):
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser(description="Welcome to crisli. This tool can be used to generate a gRNA library.")
-	parser.add_argument("n", type=int, default=4, help="Number of gRNA per location")
-	parser.add_argument("seq_file", type=argparse.FileType(), help="genbank file with genome sequence and annotation")
-	parser.add_argument("tss_file", type=argparse.FileType(), help="file with tss")
+	parser.add_argument("n", type=int, default=4, help="Number of gRNA per region")
+	parser.add_argument("s", type=int, default=0, help="search strategy. 0: if strand is -1 prefer near region start, if strand is 1 prefer near region end")
+	parser.add_argument("seq_file", type=argparse.FileType(), help="fasta file")
+	parser.add_argument("region_file", type=argparse.FileType(), help="file with regions to search for gRNA")
 
 	args = parser.parse_args()
 
 	# additional settings
-	# gRNA scan zone upstream/downstream
-	gszu = 35
-	gszd = 50
+
 	# size of gRNA
 	sog = 20  # this effects crispy++ scoring...theres a hardcoded size in there
 
-	seqrecs = SeqIO.to_dict(SeqIO.parse(args.seq_file, "genbank"))
+	print("read commandline. Reading fasta.")
+	seqrecs = SeqIO.to_dict(SeqIO.parse(args.seq_file, "fasta"))
+	print("Read fasta.")
 	args.seq_file.close()
-
-	# strategy suggestion 1:
-	# find all grnas in promoter zone (tss +/- gszd/gszu)
-	# remove duplicates
-
-	# create db
+	print("(Re)Creating results.db (sqlite database)")
 	dbc = sqlite3.connect('results.db')
 	# create table structure
 	dbc.executescript('''
 		DROP TABLE IF EXISTS contigs;
-		DROP TABLE IF EXISTS tss;
+		DROP TABLE IF EXISTS region;
 		DROP TABLE IF EXISTS grna;
 		CREATE TABLE contigs (
 			id TEXT PRIMARY KEY,
 			seq TEXT);
-		CREATE TABLE tss (
+		CREATE TABLE region (
 			id TEXT PRIMARY KEY,
 			contig TEXT,
 			strand TEXT,
-			pos int,
+			spos int,
+			epos int,
 			FOREIGN KEY(contig) REFERENCES contigs(id));
 		CREATE TABLE grna (
 			id INTEGER PRIMARY KEY,
 			seq text,
 			strand text,
 			pos int,
-			tss TEXT,
-			FOREIGN KEY(tss) REFERENCES tss(id));
+			offscore int,
+			region TEXT,
+			FOREIGN KEY(region) REFERENCES region(id));
 	''')
 
+	print("looking for grnas in regions from region file")
 	# go over tss's and find grnas around them that fulfill some requirements
 	contigs = set()  # store contigs
-	tsss = set()	 # store tss's
+	regions = set()	 # store tss's
 	grnas = set()	 # store grnas
-	with args.tss_file as f:
+	with args.region_file as f:
 		for line in f.readlines():  # each line is a tss
-			id, contig, strand, pos = line.strip().split("\t")
-			pos = int(pos)
+			region_id, contig, strand, spos, epos = line.strip().split("\t")
+			spos = int(spos)
+			epos = int(epos)
 			contigs.add((contig, str(seqrecs[contig].seq), ))
-			tsss.add((id, contig, strand, pos))
+			regions.add((region_id, contig, strand, spos, epos))
 
-			# find each grna around the tss
-			if strand == '1':  # forward strand
-				promoseq = seqrecs[contig][pos-gszu:pos+gszd].seq
-				# find CC's and store them reverse transcribed
-				for pot_pos in findall("CC", promoseq):
+			# find each grna in the region
+			region_seq = seqrecs[contig][spos:epos].seq
+			if strand == '1':  # search the forward strand
+				for pot_pos in findall("GG", region_seq):
 					# get grna seq without pam
-					grna_start_pos = pos-gszu+pot_pos+3
-					gseq = seqrecs[contig].seq[grna_start_pos:grna_start_pos+sog].reverse_complement()
-					grnas.add((str(gseq), "-1", grna_start_pos, id))
+					grna_5mark_pos = spos+pot_pos-sog-1
+					gseq = seqrecs[contig].seq[grna_5mark_pos:grna_5mark_pos+sog]
+					grnas.add((str(gseq).upper(), "1", grna_5mark_pos, region_id))
 			else:  # reverse strand
-				promoseq = seqrecs[contig][pos-gszd:pos+gszu].seq
-				# find GG's and store them
-				for pot_pos in findall("GG", promoseq):
+				# find CC's and store them reverse transcribed
+				for pot_pos in findall("CC", region_seq):
 					# get grna seq without pam
-					grna_end_pos = pos-gszd+pot_pos-1
-					gseq = seqrecs[contig].seq[grna_end_pos-sog:grna_end_pos]
-					grnas.add((str(gseq), "1", grna_end_pos-sog, id))
+					grna_5mark_pos = spos + pot_pos + 3 + sog
+					gseq = seqrecs[contig].seq[grna_5mark_pos-sog:grna_5mark_pos].reverse_complement()
+					grnas.add((str(gseq).upper(), "-1", grna_5mark_pos, region_id))
 
+	print("writing results to db")
 	# write contig, tss and grnas to db
 	dbc.executemany("INSERT INTO contigs VALUES (?, ?)", contigs)
-	dbc.executemany("INSERT INTO tss VALUES (?, ?, ?, ?)", tsss)
-	dbc.executemany("INSERT INTO grna (seq, strand, pos, tss) VALUES (?, ?, ?, ?)", grnas)
+	dbc.executemany("INSERT INTO region VALUES (?, ?, ?, ?, ?)", regions)
+	dbc.executemany("INSERT INTO grna (seq, strand, pos, region) VALUES (?, ?, ?, ?)", grnas)
 	dbc.commit()
 
-	# Strategy forward:
-	#  Save gRNAs (I guess they are already saved in the "grnas" set)
-	#  Then remove duplicates from the gRNA table
-	#  Then find all tss's that has less than the requested number of grnas
-	#    Then go through those tss's and go downstream from gszd and find the needed extra grnas
-	#      Check that those gRNAS dont exist in the original grnas set
-	#      Search region up to first CDS stop codon
+	print("Removing duplicate gRNA that are present at multiple locations (gRNA may also exists as duplicates due to overlapping regions, these will be allowed to persist)")
+	dbc.execute("delete from grna where seq in (select s.seq from grna s join grna t on s.seq = t.seq and s.pos != t.pos group by s.seq)")
 
-	#remove duplicate grnas
-	dbc.execute("DELETE FROM grna WHERE seq in (SELECT seq FROM grna GROUP BY seq HAVING COUNT(seq) != 1)")
+	print("Write remaining gRNA to file for crispy++ scoring")
+	with open('scoreme', 'w') as f:
+		f.writelines(f"{grna}\n" for grna in dbc.execute("select distinct seq from grna"))
 
-	#get grna per tss count
-	gpt = [x for x in dbc.execute("select tss.id, COUNT(grna.id) c from tss INNER JOIN grna on tss.id = grna.tss GROUP BY tss.id")]
-	print(gpt[:3])
+	print("Score with crispy++. Note that if you are running this on a network drive its gonna run slow.")
+	run(shsplit("./crispy score 8 scoreme"))
+	print("reading scores")
+	with open('scored.laeb') as f:
+		scored = [tuple(x.strip().split("\t")[::-1]) for x in f.readlines()]
 
-	print([x for x in dbc.execute("SELECT COUNT(*) FROM grna")])
+	print("storing in results.db")
+	dbc.executemany("update grna set offscore = ? where seq is ?", scored)
 
+	print(f"going over regions and in cases where there are more than {args.n} grnas a gc filter, the score and the position will be used to select")
+	#first lets get all grnas....I think its ok to keep them in memory and faster than retrieving them individually
+	region_grna = {}
+	for gid, seq, strand, pos, offscore, region in dbc.execute(("select * from grna")):
+		if region in region_grna:
+			region_grna[region].append([gid, seq, strand, pos, offscore])
+		else:
+			region_grna[region] = [[gid, seq, strand, pos, offscore]]
+	# find regions with more than n grnas
+	for region_id, region_strand, grna_count in dbc.execute("select region.id, region.strand, COUNT(grna.id) c from region INNER JOIN grna on grna.region = region.id GROUP BY region.id having c > 4"):
+		grnas = region_grna[region_id]  # ok lets get the grnas
+		filtered_grna_ids = []  # will be filled with grna to remove from db
+		# ok filter tactics
+		# step 1. See if its sufficient to filter out based on GC (20-80%)
+		#1.1. calc gc
+		pgcs = [(x[1].count("C") + x[1].count("G")) / len(x[1]) for x in grnas]
+		#1.2 change %gc to how far away you are from edges. E.g. 15% gc = 5% away from 20. and 85% gc is 5% away from 80...
+		pgcs_edge = []
+		for gc in pgcs:
+			if gc < 0.2:
+				pgcs_edge.append(0.2-gc)
+			elif gc > 0.8:
+				pgcs_edge.append(gc-0.8)
+			else:
+				pgcs_edge.append(0)
+		grnas = [[*x, pgcs_edge[i]] for i, x in enumerate(grnas)]  # add percent gc to grnas
+		grnas = sorted(grnas, key=lambda x: x[5], reverse=True)
+		for gid, seq, strand, pos, offscore, gc_edge in grnas:
+			if gc_edge != 0:
+				filtered_grna_ids.append(gid)
+				if len(grnas) - len(filtered_grna_ids) == args.n:  # if the remaining amount of grnas is now n
+					break
+			else:  # we have reached the end of bad gcs
+				break
+		# now check if we need to filter more for this region
+		if len(grnas) - len(filtered_grna_ids) > args.n:  # if the remaining amount of grnas is still larger than n
+			pass # do more filtering
+
+		# ok end of filtering. There are now args.n grna
+		dbc.execute("remove filtered grna ids")
+
+		#number_of_bad_gcs = sum([1 if x < 0.2 or x > 0.8 else 0 for x in pgcs])
+
+	print(f"Filtering complete. All regions now have {args.n} or less gRNAs.")
 	dbc.close()
