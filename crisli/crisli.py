@@ -74,6 +74,7 @@ if __name__ == '__main__':
 		DROP TABLE IF EXISTS contigs;
 		DROP TABLE IF EXISTS region;
 		DROP TABLE IF EXISTS grna;
+		DROP TABLE IF EXISTS offscores;
 		CREATE TABLE contigs (
 			id TEXT PRIMARY KEY,
 			seq TEXT);
@@ -89,9 +90,13 @@ if __name__ == '__main__':
 			seq text,
 			strand text,
 			pos int,
-			offscore int,
 			region TEXT,
 			FOREIGN KEY(region) REFERENCES region(id));
+		CREATE TABLE offscores (
+			id INTEGER PRIMARY KEY,
+			offscore int,
+			grna int,
+			FOREIGN KEY (grna) references grna(id));
 	''')
 
 	print("looking for grnas in regions from region file")
@@ -135,29 +140,30 @@ if __name__ == '__main__':
 
 	print("Write remaining gRNA to file for crispy++ scoring")
 	with open('scoreme', 'w') as f:
-		f.writelines(f"{grna}\n" for grna in dbc.execute("select distinct seq from grna"))
+		f.writelines(f"{grna}\t{gid}\n" for gid, grna in dbc.execute("select id, seq from grna"))
 
 	print("Score with crispy++. Note that if you are running this on a network drive its gonna run slow.")
-	run(shsplit("./crispy score 8 scoreme"))
+	run(shsplit("crispy score 8 scoreme"))
 	print("reading scores")
 	with open('scored.laeb') as f:
-		scored = [tuple(x.strip().split("\t")[::-1]) for x in f.readlines()]
+		scored = [x.strip().split("\t") for x in f.readlines()]  # seq, gid, score
 
 	print("storing in results.db")
-	dbc.executemany("update grna set offscore = ? where seq is ?", scored)
+	dbc.executemany("INSERT INTO offscores (offscore, grna) VALUES (?, ?)", ((score, gid) for seq, gid, score in scored))
 
 	print(f"going over regions and in cases where there are more than {args.n} grnas a gc filter, the score and the position will be used to select")
 	#first lets get all grnas....I think its ok to keep them in memory and faster than retrieving them individually
 	region_grna = {}
-	for gid, seq, strand, pos, offscore, region in dbc.execute(("select * from grna")):
+	for gid, seq, strand, pos, region in dbc.execute(("select * from grna")):
 		if region in region_grna:
-			region_grna[region].append([gid, seq, strand, pos, offscore])
+			region_grna[region].append([gid, seq, strand, pos])
 		else:
-			region_grna[region] = [[gid, seq, strand, pos, offscore]]
+			region_grna[region] = [[gid, seq, strand, pos]]
 	# find regions with more than n grnas
+
 	for region_id, region_strand, grna_count in dbc.execute("select region.id, region.strand, COUNT(grna.id) c from region INNER JOIN grna on grna.region = region.id GROUP BY region.id having c > 4"):
 		grnas = region_grna[region_id]  # ok lets get the grnas
-		filtered_grna_ids = []  # will be filled with grna to remove from db
+		filtered_grna_ids = set()  # will be filled with grna to remove from db
 		# ok filter tactics
 		# step 1. See if its sufficient to filter out based on GC (20-80%)
 		#1.1. calc gc
@@ -172,22 +178,32 @@ if __name__ == '__main__':
 			else:
 				pgcs_edge.append(0)
 		grnas = [[*x, pgcs_edge[i]] for i, x in enumerate(grnas)]  # add percent gc to grnas
-		grnas = sorted(grnas, key=lambda x: x[5], reverse=True)
-		for gid, seq, strand, pos, offscore, gc_edge in grnas:
+		grnas = sorted(grnas, key=lambda x: x[4], reverse=True)
+		for gid, seq, strand, pos, gc_edge in grnas:
 			if gc_edge != 0:
-				filtered_grna_ids.append(gid)
+				filtered_grna_ids.add(str(gid))
 				if len(grnas) - len(filtered_grna_ids) == args.n:  # if the remaining amount of grnas is now n
 					break
 			else:  # we have reached the end of bad gcs
 				break
 		# now check if we need to filter more for this region
 		if len(grnas) - len(filtered_grna_ids) > args.n:  # if the remaining amount of grnas is still larger than n
-			pass # do more filtering
+			# filter tactic 2
+			# something with position and score
+			# we want them as 5' as possible AND with lowest possible score
+			# maybe I could consider "meaningful changes"
+			#    aka position difference less than 50 bp is not a meaningful change
+			#    I dont know what a meaning offscore is
+			# one could maybe select the args.n 5' most grnas
+			# then it could go through them one by one and see if a grna exist downstream with lower score.
+			# if it does, check if its a meaningfull distance away. If not, select it.....hmm..this risks slowly moving everything downstream
+			#
+			pass  # do more filtering
 
 		# ok end of filtering. There are now args.n grna
-		dbc.execute("remove filtered grna ids")
-
-		#number_of_bad_gcs = sum([1 if x < 0.2 or x > 0.8 else 0 for x in pgcs])
+		if filtered_grna_ids:
+			dbc.execute("delete from grna where id in (?)", (", ".join(filtered_grna_ids), ))
 
 	print(f"Filtering complete. All regions now have {args.n} or less gRNAs.")
+	## now maybe collapse by seq and write out seq, strand, pos, list of regions as well as a region focused list
 	dbc.close()
