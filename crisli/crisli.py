@@ -224,7 +224,7 @@ if __name__ == '__main__':
 			# that would be, if strand is 1 then its the highest pos and if strand is -1 then its the lowest pos
 			# in the current version of grna from 1 region will have same strand
 			#
-			re = True if grnas_left[0][2] == '1' else False  # determine region strand
+			re = False if grnas_left[0][2] == '1' else True  # determine region strand
 			grnas_left = sorted(grnas_left, key=lambda x: x[3], reverse=re)  # sort by pos
 			for gid, seq, strand, pos, offscore, gc_edge in grnas_left:
 				filtered_grna_ids.append(gid)
@@ -238,4 +238,5 @@ if __name__ == '__main__':
 
 	print(f"Filtering complete. All regions now have {args.n} or less gRNAs.")
 	## now maybe collapse by seq and write out seq, strand, pos, list of regions as well as a region focused list
+
 	dbc.close()
