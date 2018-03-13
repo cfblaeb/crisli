@@ -43,6 +43,7 @@ import sqlite3
 from subprocess import run
 from shlex import split as shsplit
 from Bio import SeqIO
+from helpers.filters import gc_filter, offtarget_score_filter
 
 
 def findall(sub, string):
@@ -73,7 +74,7 @@ if __name__ == '__main__':
 	seqrecs = SeqIO.to_dict(SeqIO.parse(args.seq_file, "fasta"))
 	print("Read fasta.")
 	args.seq_file.close()
-	print("(Re)Creating results.db (sqlite database)")
+	print("Creating results.db (sqlite database, will overwrite existing)")
 	dbc = sqlite3.connect('results.db')
 	# create table structure
 	dbc.executescript('''
@@ -170,63 +171,31 @@ if __name__ == '__main__':
 	# a threshold to use for offscore filtering
 	threshold = dbc.execute("select offscore from offscores order by offscore asc limit 1 offset(select count(*) from offscores) * 99/100-1").fetchone()[0]  # 99th percentile
 	for region_id, region_strand, grna_count in dbc.execute("select region.id, region.strand, COUNT(grna.id) c from region INNER JOIN grna on grna.region = region.id GROUP BY region.id having c > 4"):
-		# try to remove grna using 2 filters and if at any point theres only args.n left, then stop
-		# filter 1: %GC
-		# filter 2: offscore
+		# try to remove grna using filters and if at any point theres only args.n left, then stop.
+		# If after all filters there are still > args.n then pick the 5' most ones
+		# filter 1: position must be in first half region
+		# filter 2: %GC
+		# filter 3: offscore
 		# select args.n 5' most grnas left (strand dependent)
 
 		grnas = region_grna[region_id]  # ok lets get the grnas
-		filtered_grna_ids = []  # will be filled with grna to remove from db
-		# ok filter tactics
-		# step 1. See if its sufficient to filter out based on GC (20-80%)
-		#1.1. calc gc
-		pgcs = [(x[1].count("C") + x[1].count("G")) / len(x[1]) for x in grnas]
-		#1.2 change %gc to how far away you are from edges. E.g. 15% gc = 5% away from 20. and 85% gc is 5% away from 80...
-		pgcs_edge = []
-		for gc in pgcs:
-			if gc < 0.2:
-				pgcs_edge.append(0.2-gc)
-			elif gc > 0.8:
-				pgcs_edge.append(gc-0.8)
-			else:
-				pgcs_edge.append(0)
-		grnas = [[*x, pgcs_edge[i]] for i, x in enumerate(grnas)]  # add percent gc to grnas
-		grnas = sorted(grnas, key=lambda x: x[5], reverse=True)
-		for gid, seq, strand, pos, offscore, gc_edge in grnas:
-			if gc_edge != 0:
-				filtered_grna_ids.append(gid)
-				if len(grnas) - len(filtered_grna_ids) == args.n:  # if the remaining amount of grnas is now n
-					break
-			else:  # we have reached the end of bad gcs
-				break
+
+		filter_functions = [(gc_filter, {}), (offtarget_score_filter, {'threshold': threshold})]
+		filtered_grna_ids = []
+		for func, opts in filter_functions:
+			grnas_left = [x for x in grnas if x[0] not in filtered_grna_ids]
+			if len(grnas_left) > args.n:
+				filtered_grna_ids += func(grnas, args.n, **opts)
 
 		grnas_left = [x for x in grnas if x[0] not in filtered_grna_ids]
 
-		# now check if we need to filter more for this region
 		if len(grnas_left) > args.n:  # if the remaining amount of grnas is still larger than n
-			# filter tactic 2
-			# offscore. threshold based.
-			# take out grna with an offscore above threshold
-			# sort by offscores
-			grnas_left = sorted(grnas_left, key=lambda x: x[4], reverse=True)
-			for gid, seq, strand, pos, offscore, gc_edge in grnas_left:
-				if offscore > threshold:
-					filtered_grna_ids.append(gid)
-					if len(grnas) - len(filtered_grna_ids) == args.n:  # if the remaining amount of grnas is now n
-						break
-				else:  # we have reached the end of bad gcs
-					break
-
-		grnas_left = [x for x in grnas if x[0] not in filtered_grna_ids]
-
-		if len(grnas) - len(filtered_grna_ids) > args.n:  # if the remaining amount of grnas is still larger than n
 			# then pick the args.n 5' most targets
 			# that would be, if strand is 1 then its the highest pos and if strand is -1 then its the lowest pos
 			# in the current version of grna from 1 region will have same strand
-			#
 			re = False if grnas_left[0][2] == '1' else True  # determine region strand
 			grnas_left = sorted(grnas_left, key=lambda x: x[3], reverse=re)  # sort by pos
-			for gid, seq, strand, pos, offscore, gc_edge in grnas_left:
+			for gid, seq, strand, pos, offscore in grnas_left:
 				filtered_grna_ids.append(gid)
 				if len(grnas) - len(filtered_grna_ids) == args.n:  # if the remaining amount of grnas is now n
 					break
@@ -237,6 +206,35 @@ if __name__ == '__main__':
 	dbc.commit()
 
 	print(f"Filtering complete. All regions now have {args.n} or less gRNAs.")
-	## now maybe collapse by seq and write out seq, strand, pos, list of regions as well as a region focused list
+	print("preparing results from db for export")
+	grnas = list(dbc.execute("select * from grna"))
+	grna_dict = {}
+	grna_to_region_dict = {}
+	region_to_grna_dict = {}
+	for id, seq, strand, pos, region in grnas:
+		grna_dict[seq] = f'{strand}\t{pos}'
+		if seq in grna_to_region_dict:
+			grna_to_region_dict[seq] += f", {region}"
+		else:
+			grna_to_region_dict[seq] = region
 
+		if region in region_to_grna_dict:
+			region_to_grna_dict[region] += f", {seq}"
+		else:
+			region_to_grna_dict[region] = seq
+	print("writing grna.tsv")
+	with open('grna.tsv', 'w') as f:
+		f.write("seq\tstrand\tpos\n")
+		for key, val in grna_dict.items():
+			f.write(f"{key}\t{val}\n")
+	print("writing grna_to_region.tsv")
+	with open('grna_to_region.tsv', 'w') as f:
+		f.write("seq\tregion(s)\n")
+		for key, val in grna_to_region_dict.items():
+			f.write(f"{key}\t{val}\n")
+	print("writing region_to_grna.tsv")
+	with open('region_to_grna.tsv', 'w') as f:
+		f.write("region\tgrna(s)\n")
+		for key, val in region_to_grna_dict.items():
+			f.write(f"{key}\t{val}\n")
 	dbc.close()
