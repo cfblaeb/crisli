@@ -185,7 +185,7 @@ if __name__ == '__main__':
 		for func, opts in filter_functions:
 			grnas_left = [x for x in grnas if x[0] not in filtered_grna_ids]
 			if len(grnas_left) > args.n:
-				filtered_grna_ids += func(grnas, args.n, **opts)
+				filtered_grna_ids += func(grnas_left, args.n, **opts)
 
 		grnas_left = [x for x in grnas if x[0] not in filtered_grna_ids]
 
