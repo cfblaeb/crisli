@@ -258,4 +258,6 @@ if __name__ == '__main__':
 		f.write("region\tgrna(s)\n")
 		for key, val in region_to_grna_dict.items():
 			f.write(f"{key}\t{val}\n")
+
+	#### MÅSKE ENDNU EN RAPPORT MED REGIONS med 0 grna...lige nu er det kun regions med mindst 1 grna...
 	dbc.close()
