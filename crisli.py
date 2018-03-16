@@ -170,7 +170,7 @@ if __name__ == '__main__':
 	# find regions with more than n grnas and decide which to keep
 	# a threshold to use for offscore filtering
 	threshold = dbc.execute("select offscore from offscores order by offscore asc limit 1 offset(select count(*) from offscores) * 99/100-1").fetchone()[0]  # 99th percentile
-	for region_id, region_strand, region_s_pos, region_e_pos, grna_count in dbc.execute("select region.id, region.strand, region.spos, region.epos, COUNT(grna.id) c from region INNER JOIN grna on grna.region = region.id GROUP BY region.id having c > 4"):
+	for region_id, region_strand, region_s_pos, region_e_pos, grna_count in dbc.execute("select region.id, region.strand, region.spos, region.epos, COUNT(grna.id) c from region INNER JOIN grna on grna.region = region.id GROUP BY region.id having c > 0"):
 		# try to remove grna using filters and if at any point theres only args.n left, then stop.
 		# If after all filters there are still > args.n then pick the 5' most ones
 		# filter 1: position must be in first half region
