@@ -1,10 +1,11 @@
-def gc_filter(grnas: list, argn: int, lower: float=0.2, upper: float=0.8):
+def gc_filter(grnas: list, argn: int, lower: float=0.2, upper: float=0.8, hard_filter: bool = False):
 	"""
 	Filter based on %GC
 	:param grnas: list of grna tuples (gid, seq, strand, pos, offscore)
 	:param argn:  desired number of grna
 	:param lower: lowest allowed gc
 	:param upper: highest allowed gc
+	:param hard_filter: If true, remove all grnas that fit criteria. If false, remove only until theres argn grna left
 	:return: filtered_grnas_ids (grnas that failed this test)
 	"""
 	filtered_grna_ids = []  # will be filled with grna to remove from db
@@ -32,12 +33,13 @@ def gc_filter(grnas: list, argn: int, lower: float=0.2, upper: float=0.8):
 	return filtered_grna_ids
 
 
-def offtarget_score_filter(grnas: list, argn: int, threshold: int):
+def offtarget_score_filter(grnas: list, argn: int, threshold: int, hard_filter: bool = False):
 	"""
 	Filter based on offtarget score
 	:param grnas: list of grna tuples (gid, seq, strand, pos, offscore)
 	:param argn:  desired number of grna
 	:param threshold: a threshold over which targets will be filtered
+	:param hard_filter: If true, remove all grnas that fit criteria. If false, remove only until theres argn grna left
 	:return: filtered_grnas_ids (grnas that failed this test)
 	"""
 	filtered_grna_ids = []
@@ -53,16 +55,26 @@ def offtarget_score_filter(grnas: list, argn: int, threshold: int):
 	return filtered_grna_ids
 
 
-def five_mark_filter(grnas: list, argn: int, region_start_pos: int, max_distance: int):
+def five_mark_filter(grnas: list, argn: int, region_start_pos: int, region_end_pos: int, max_distance_bp: int, max_distance_pct: float, hard_filter: bool = False):
 	"""
 	Filter based on position. Position should, from 5' end (strand specific), be no more than max_distance downstream
-	:param grnas: list of grna tuples (gid, seq, strand, pos, offscore)
-	:param argn:  desired number of grna
-	:param region_start_pos: region start bp
-	:param max_distance: distance from region start (strand specific)
-	:return: filtered_grnas_ids (grnas that failed this test)
+	Max distance should be defined as both bp and pct. Which ever comes first will be used.
+	:param grnas:
+	:param argn:
+	:param region_start_pos:
+	:param region_strand: string of either '1' or '-1'
+	:param max_distance_bp:
+	:param max_distance_pct: 0-1
+	:param hard_filter: If true, remove all grnas that fit criteria. If false, remove only until theres argn grna left
+	:return:
 	"""
-	filtered_grna_ids = []
 
+	filtered_grna_ids = []
+	rl = abs(region_end_pos-region_start_pos)
+	if hard_filter:
+		for gid, seq, strand, pos, offscore in grnas:
+			dist_from_start = abs(pos - region_start_pos)
+			if dist_from_start > max_distance_bp or dist_from_start/rl > max_distance_pct:
+				filtered_grna_ids.append(gid)
 
 	return filtered_grna_ids

@@ -43,7 +43,7 @@ import sqlite3
 from subprocess import run
 from shlex import split as shsplit
 from Bio import SeqIO
-from helpers.filters import gc_filter, offtarget_score_filter
+from helpers.filters import gc_filter, offtarget_score_filter, five_mark_filter
 
 
 def findall(sub, string):
@@ -59,7 +59,7 @@ def findall(sub, string):
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser(description="Welcome to crisli. This tool can be used to generate a gRNA library.")
 	parser.add_argument("n", type=int, default=4, help="Number of gRNA per region")
-	parser.add_argument("s", type=int, default=0, help="search strategy. 0: if strand is -1 prefer near region start, if strand is 1 prefer near region end")
+	parser.add_argument("s", type=int, default=0, help="search strategy. 0: gRNAi strategy (only one implemented so far) (filters are only applied to regions with more than n gRNAs)")
 	parser.add_argument("seq_file", type=argparse.FileType(), help="fasta file")
 	parser.add_argument("region_file", type=argparse.FileType(), help="file with regions to search for gRNA")
 
@@ -170,7 +170,7 @@ if __name__ == '__main__':
 	# find regions with more than n grnas and decide which to keep
 	# a threshold to use for offscore filtering
 	threshold = dbc.execute("select offscore from offscores order by offscore asc limit 1 offset(select count(*) from offscores) * 99/100-1").fetchone()[0]  # 99th percentile
-	for region_id, region_strand, grna_count in dbc.execute("select region.id, region.strand, COUNT(grna.id) c from region INNER JOIN grna on grna.region = region.id GROUP BY region.id having c > 4"):
+	for region_id, region_strand, region_s_pos, region_e_pos, grna_count in dbc.execute("select region.id, region.strand, region.spos, region.epos, COUNT(grna.id) c from region INNER JOIN grna on grna.region = region.id GROUP BY region.id having c > 4"):
 		# try to remove grna using filters and if at any point theres only args.n left, then stop.
 		# If after all filters there are still > args.n then pick the 5' most ones
 		# filter 1: position must be in first half region
@@ -180,11 +180,32 @@ if __name__ == '__main__':
 
 		grnas = region_grna[region_id]  # ok lets get the grnas
 
-		filter_functions = [(gc_filter, {}), (offtarget_score_filter, {'threshold': threshold})]
+		# setup filter functions depending on selected strategy
+		if args.s == 0:
+			# strategy zero
+			# for gRNAi library
+			# 1) Distance from 5' filter
+			# 2) GC filter
+			# 3) Offtarget filter
+			filter_functions = [
+				(
+					five_mark_filter,
+					{
+						'hard_filter': True,
+						'region_start_pos': region_s_pos,
+						'region_end_pos': region_e_pos,
+						'max_distance_bp': 500,
+						'max_distance_pct': 0.2
+					}
+				),
+				(gc_filter, {}),
+				(offtarget_score_filter, {'threshold': threshold})
+			]
+
 		filtered_grna_ids = []
 		for func, opts in filter_functions:
 			grnas_left = [x for x in grnas if x[0] not in filtered_grna_ids]
-			if len(grnas_left) > args.n:
+			if len(grnas_left) > args.n or ('hard_filter' in opts and opts['hard_filter'] is True):
 				filtered_grna_ids += func(grnas_left, args.n, **opts)
 
 		grnas_left = [x for x in grnas if x[0] not in filtered_grna_ids]
@@ -193,7 +214,7 @@ if __name__ == '__main__':
 			# then pick the args.n 5' most targets
 			# that would be, if strand is 1 then its the highest pos and if strand is -1 then its the lowest pos
 			# in the current version of grna from 1 region will have same strand
-			re = False if grnas_left[0][2] == '1' else True  # determine region strand
+			re = False if region_strand == '1' else True  # determine region strand
 			grnas_left = sorted(grnas_left, key=lambda x: x[3], reverse=re)  # sort by pos
 			for gid, seq, strand, pos, offscore in grnas_left:
 				filtered_grna_ids.append(gid)
