@@ -229,20 +229,14 @@ if __name__ == '__main__':
 	print(f"Filtering complete. All regions now have {args.n} or less gRNAs.")
 	print("preparing results from db for export")
 	grnas = list(dbc.execute("select * from grna"))
+	regions = list(dbc.execute("select * from region"))
 	grna_dict = {}
-	grna_to_region_dict = {}
-	region_to_grna_dict = {}
+	grna_to_region_dict = {x[1]: "" for x in grnas}
+	region_to_grna_dict = {x[0]: "" for x in regions}
 	for id, seq, strand, pos, region in grnas:
 		grna_dict[seq] = f'{strand}\t{pos}'
-		if seq in grna_to_region_dict:
-			grna_to_region_dict[seq] += f", {region}"
-		else:
-			grna_to_region_dict[seq] = region
-
-		if region in region_to_grna_dict:
-			region_to_grna_dict[region] += f", {seq}"
-		else:
-			region_to_grna_dict[region] = seq
+		grna_to_region_dict[seq] += f", {region}"
+		region_to_grna_dict[region] += f", {seq}"
 	print("writing grna.tsv")
 	with open('grna.tsv', 'w') as f:
 		f.write("seq\tstrand\tpos\n")
@@ -259,5 +253,4 @@ if __name__ == '__main__':
 		for key, val in region_to_grna_dict.items():
 			f.write(f"{key}\t{val}\n")
 
-	#### MÅSKE ENDNU EN RAPPORT MED REGIONS med 0 grna...lige nu er det kun regions med mindst 1 grna...
 	dbc.close()
